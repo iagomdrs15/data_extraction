@@ -42,11 +42,15 @@ if botao_executar:
             except json.JSONDecodeError:
                 cookies_string = sessao_colada # Assume que é o texto cru copiado da Network
             
+            # --- A FAXINA AUTOMÁTICA ---
+            # Remove quebras de linha invisíveis (\n e \r) que quebram o cabeçalho HTTP
+            cookies_string = cookies_string.replace('\n', '').replace('\r', '').strip()
+            
             # 2. Extrair CSRF Token
             csrf_match = re.search(r'csrftoken=([^;]+)', cookies_string)
             csrf_token = csrf_match.group(1) if csrf_match else 'dummy_token'
             
-            # 3. Limpar a lista de BRs
+            # 3. Limpar a lista de BRs (aceita textos com espaços, vírgulas, etc)
             ids_para_buscar = re.findall(r'BR[a-zA-Z0-9]+', lista_brs)
             
             if not ids_para_buscar:
@@ -67,9 +71,10 @@ if botao_executar:
                     
                     with st.spinner(f"Buscando {shipment_id}..."):
                         resp = requests.get(url, headers=headers)
+                        
                         if resp.status_code == 200:
                             dados_brutos = resp.json()
-                            # Ajuste de navegação no JSON caso a estrutura da SPX seja encadeada
+                            # Extrai a raiz dos dados, adaptando-se ao formato da SPX
                             info = dados_brutos.get('data', dados_brutos)
                             info['shipment_id_search'] = shipment_id 
                             resultados.append(info)
