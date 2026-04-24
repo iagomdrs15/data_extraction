@@ -2,67 +2,92 @@ import streamlit as st
 import json
 import re
 import requests
+import pandas as pd
 
 # Configuração da página
-st.set_page_config(page_title="Analista Logístico SPX", page_icon="📦", layout="centered")
+st.set_page_config(page_title="Analista Logístico SPX", page_icon="📦", layout="wide")
 
 st.title("📦 Analista Logístico Inteligente")
-st.markdown("Bem-vindo! Cole sua sessão capturada pelo **Favorito Mágico** para iniciar a conexão segura.")
+st.markdown("Integração direta com o portal SPX via API.")
 
-# 1. Campos de Entrada
-sessao_colada = st.text_input("🔑 Sessão (Ctrl+V):", type="password", help="Cole o código gerado pelo seu Favorito Mágico aqui.")
+# Sidebar para configurações de acesso
+with st.sidebar:
+    st.header("🔑 Configuração de Acesso")
+    sessao_colada = st.text_area("Sessão ou Cookie Cru:", height=200, help="Cole aqui o Cookie gigante da aba Network.")
+    st.info("A sessão é mantida apenas na memória temporária desta aba.")
 
-st.markdown("---")
-st.subheader("🛠️ Área de Teste de API")
-api_url = st.text_input("🔗 URL da API da SPX para testar:", 
-                        placeholder="Ex: https://spx.shopee.com.br/api/v1/logistics/brs...",
-                        help="Pegue esta URL na aba Network (Rede) do Inspecionar (F12).")
+# Área principal
+col1, col2 = st.columns([1, 2])
 
-# 2. Botão de Ação
-if st.button("🚀 Conectar e Extrair Dados", use_container_width=True):
+with col1:
+    st.subheader("🚀 Extração em Lote")
+    lista_brs = st.text_area("Lista de Shipment IDs (um por linha):", 
+                             placeholder="BR262635244052P\nBR123456789...",
+                             height=200)
+    
+    botao_executar = st.button("Buscar Dados das BRs", use_container_width=True)
+
+# Lógica de Extração
+if botao_executar:
     if not sessao_colada:
-        st.warning("⚠️ Por favor, cole a sessão mágica primeiro.")
-    elif not api_url:
-        st.warning("⚠️ Por favor, informe a URL da API que deseja testar.")
+        st.error("❌ Milorde, por favor cole a sessão na barra lateral.")
+    elif not lista_brs:
+        st.warning("⚠️ Insira ao menos um código de remessa (BR).")
     else:
         try:
-            # 3. Descriptografando a Sessão
-            dados_sessao = json.loads(sessao_colada)
-            usuario = dados_sessao.get('usuario', 'Desconhecido')
-            cookies_string = dados_sessao.get('cookies', '')
+            # 1. Modo de Leitura Inteligente (Aceita JSON ou Texto Cru)
+            try:
+                dados_sessao = json.loads(sessao_colada)
+                cookies_string = dados_sessao.get('cookies', '')
+            except json.JSONDecodeError:
+                cookies_string = sessao_colada # Assume que é o texto cru copiado da Network
             
-            # 4. Garimpando a Trava de Segurança (CSRF Token)
+            # 2. Extrair CSRF Token
             csrf_match = re.search(r'csrftoken=([^;]+)', cookies_string)
-            csrf_token = csrf_match.group(1) if csrf_match else ''
+            csrf_token = csrf_match.group(1) if csrf_match else 'dummy_token'
             
-            if not csrf_token:
-                st.error("❌ Falha de segurança: 'csrftoken' não encontrado na sessão. Refaça o login no sistema.")
+            # 3. Limpar a lista de BRs
+            ids_para_buscar = re.findall(r'BR[a-zA-Z0-9]+', lista_brs)
+            
+            if not ids_para_buscar:
+                st.error("❌ Nenhum código BR válido foi detectado no texto.")
             else:
-                st.success(f"✅ Autenticado com sucesso! Usuário reconhecido: **{usuario}**")
-                
-                # 5. Montando o Disfarce (Headers)
                 headers = {
                     'Cookie': cookies_string,
                     'X-CSRFToken': csrf_token,
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Accept': 'application/json, text/plain, */*'
                 }
+
+                resultados = []
+                progresso = st.progress(0)
                 
-                # 6. O Ataque Silencioso
-                with st.spinner("Conectando aos servidores da SPX..."):
-                    resposta = requests.get(api_url, headers=headers)
+                for i, shipment_id in enumerate(ids_para_buscar):
+                    url = f"https://spx.shopee.com.br/api/fleet_order/order/detail/order_info?shipment_id={shipment_id}"
                     
-                    # 7. Análise da Resposta
-                    if resposta.status_code == 200:
-                        st.success("🎯 Sucesso! Dados interceptados perfeitamente:")
-                        # Exibe o JSON cru na tela para você analisar como os dados vêm estruturados
-                        st.json(resposta.json())
-                    else:
-                        st.error(f"❌ Erro na extração. O servidor respondeu com o código: {resposta.status_code}")
-                        # Mostra a mensagem de erro que o servidor enviou (ótimo para debug)
-                        st.text(resposta.text)
-                        
-        except json.JSONDecodeError:
-            st.error("❌ Formato de sessão inválido. Você copiou o texto inteiro do Favorito Mágico?")
+                    with st.spinner(f"Buscando {shipment_id}..."):
+                        resp = requests.get(url, headers=headers)
+                        if resp.status_code == 200:
+                            dados_brutos = resp.json()
+                            # Ajuste de navegação no JSON caso a estrutura da SPX seja encadeada
+                            info = dados_brutos.get('data', dados_brutos)
+                            info['shipment_id_search'] = shipment_id 
+                            resultados.append(info)
+                        else:
+                            st.error(f"Erro no ID {shipment_id}: Status {resp.status_code} - Resposta: {resp.text}")
+                    
+                    progresso.progress((i + 1) / len(ids_para_buscar))
+
+                # 4. Exibição dos Resultados em Tabela
+                if resultados:
+                    st.success(f"🎯 Extração concluída! {len(resultados)} remessas processadas.")
+                    df = pd.DataFrame(resultados)
+                    
+                    st.subheader("📊 Tabela Consolidada")
+                    st.dataframe(df, use_container_width=True)
+                    
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button("📥 Baixar Planilha (CSV)", csv, "dados_spx.csv", "text/csv")
+
         except Exception as e:
-            st.error(f"❌ Ocorreu um erro inesperado: {e}")
+            st.error(f"❌ Erro crítico: {e}")
