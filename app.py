@@ -9,54 +9,50 @@ from datetime import datetime
 st.set_page_config(page_title="SPX Hub Porto Velho", page_icon="📦", layout="wide")
 
 st.title("📦 Analista Logístico Inteligente - PVH")
+st.markdown("Extração consolidada: Status + Rastreio de Horários (SLA)")
 
 # Sidebar
 with st.sidebar:
-    st.header("🔑 Conexão")
-    sessao_colada = st.text_area("Cole a Sessão da Extensão:", height=100)
-    st.info("Utilize a extensão Elite para capturar os cookies.")
+    st.header("🔑 Conexão Elite")
+    sessao_colada = st.text_area("Sessão da Extensão:", height=100)
+    st.info("Utilize a extensão para capturar os cookies antes de processar.")
 
-# Campos solicitados
-st.subheader("🚀 Extração de Dados Específicos")
-lista_brs = st.text_area("Lista de Shipment IDs:", height=150, placeholder="BR268346709914A...")
-btn = st.button("🚀 Gerar Relatório Detalhado", use_container_width=True)
-
-# Mapeamento de Status (Ajuste conforme a realidade do seu Hub)
-STATUS_MAP = {
-    1: "Recebido no Hub",
-    2: "Em Processamento",
-    3: "Em Trânsito",
-    4: "Entregue",
-    10: "Retornado",
-}
+# Interface Principal
+lista_brs = st.text_area("Shipment IDs (um por linha):", height=150, placeholder="BR268346709914A...")
+btn = st.button("🚀 Gerar Relatório de Inventário", use_container_width=True)
 
 def formatar_data(timestamp):
     if not timestamp or timestamp == 0: return "N/A"
-    # Converte timestamp Unix (segundos) para data legível
     return datetime.fromtimestamp(timestamp).strftime('%d/%m/%Y %H:%M')
 
-def mapear_dados_especificos(raw_data):
-    b = raw_data.get('basic_info', {})
+def extrair_datas_sla(sla_data):
+    """Garimpa o JSON de SLA para achar o recebimento e a última atividade"""
+    registros = sla_data.get('sla_record_list', [])
+    data_recebimento = "N/A"
+    ultima_at = "N/A"
     
-    # Nota: SKU e Datas específicas de eventos costumam vir de outras APIs
-    # Se o dado não estiver neste JSON, deixamos o campo pronto para receber a nova API
-    return {
-        "Shipment ID": b.get('shipment_id'),
-        "Current Station": b.get('current_station_name'),
-        "Status": STATUS_MAP.get(b.get('status'), f"Cód {b.get('status')}"),
-        "Data de Recebimento": "Localizar API 'logistics_path'", # Placeholder
-        "Última AT": formatar_data(b.get('sla_tag_info', {}).get('update_time')),
-        "Descrição do SKU": "Localizar API 'item_info'" # Placeholder
-    }
+    if registros:
+        # 1. Busca o Recebimento no Hub (LMHub_Received)
+        for reg in registros:
+            if "LMHub_Received" in reg.get('sub_type', ''):
+                data_recebimento = formatar_data(reg.get('service_start_time'))
+                break
+        
+        # 2. Busca a Última Atividade (Último registro com tempo final ou inicial)
+        ultimo = registros[-1]
+        tempo = ultimo.get('actual_service_end_time') or ultimo.get('service_start_time')
+        ultima_at = formatar_data(tempo)
+            
+    return data_recebimento, ultima_at
 
 if btn:
     if not sessao_colada or not lista_brs:
-        st.error("❌ Verifique a sessão e a lista de BRs.")
+        st.error("❌ Verifique a sessão e a lista de IDs.")
     else:
         try:
+            # Configuração de Headers
             cookies = sessao_colada.replace('\n', '').replace('\r', '').strip()
             csrf = re.search(r'csrftoken=([^;]+)', cookies).group(1) if 'csrftoken' in cookies else 'dummy'
-            
             headers = {
                 'Cookie': cookies,
                 'X-CSRFToken': csrf,
@@ -65,26 +61,49 @@ if btn:
             }
 
             ids = re.findall(r'BR[a-zA-Z0-9]+', lista_brs)
-            final_data = []
+            relatorio_final = []
 
-            with st.spinner("Conectando à malha logística..."):
+            with st.status("Iniciando varredura logística...", expanded=True) as status:
                 for bid in ids:
-                    url = f"https://spx.shopee.com.br/api/fleet_order/order/detail/order_info?shipment_id={bid}"
-                    res = requests.get(url, headers=headers)
-                    if res.status_code == 200:
-                        raw = res.json().get('data', {})
-                        if raw:
-                            final_data.append(mapear_dados_especificos(raw))
-            
-            if final_data:
-                df = pd.DataFrame(final_data)
-                st.subheader("📊 Visão Operacional Detalhada")
+                    st.write(f"🔍 Processando {bid}...")
+                    
+                    # Chamada 1: Info Geral (Current Station e Status)
+                    url_info = f"https://spx.shopee.com.br/api/fleet_order/order/detail/order_info?shipment_id={bid}"
+                    # Chamada 2: Info de Horários (SLA)
+                    url_sla = f"https://spx.shopee.com.br/api/fleet_order/order/detail/sla_info?shipment_id={bid}"
+                    
+                    res_info = requests.get(url_info, headers=headers)
+                    res_sla = requests.get(url_sla, headers=headers)
+                    
+                    if res_info.status_code == 200:
+                        d_info = res_info.json().get('data', {})
+                        d_sla = res_sla.json().get('data', {}) if res_sla.status_code == 200 else {}
+                        
+                        # Processamento dos horários
+                        recebimento, ultima_at = extrair_datas_sla(d_sla)
+                        
+                        # Montagem da linha conforme pedido
+                        relatorio_final.append({
+                            "Shipment ID": bid,
+                            "Current Station": d_info.get('basic_info', {}).get('current_station_name', 'N/A'),
+                            "Data de Recebimento": recebimento,
+                            "Última AT": ultima_at,
+                            "Descrição do SKU": "Aguardando URL de Itens", # Próximo passo
+                            "Status": "Onhold (Retido)" if d_info.get('basic_info', {}).get('on_hold_reason') != 0 else "Normal"
+                        })
+                    else:
+                        st.write(f"❌ Erro ao buscar {bid}.")
+                
+                status.update(label="Relatório Concluído!", state="complete")
+
+            if relatorio_final:
+                df = pd.DataFrame(relatorio_final)
+                st.subheader("📊 Painel de Inventário Porto Velho")
                 st.dataframe(df, use_container_width=True, hide_index=True)
                 
+                # Botão de download
                 csv = df.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 Baixar Relatório (Excel)", csv, "relatorio_pvh_detalhado.csv", "text/csv")
-            else:
-                st.error("❌ Nenhum dado retornado. Verifique a sessão.")
-
+                st.download_button("📥 Baixar Planilha para o Hub", csv, "inventario_pvh.csv", "text/csv")
+                
         except Exception as e:
-            st.error(f"Erro Crítico: {e}")
+            st.error(f"Erro no processamento: {e}")
