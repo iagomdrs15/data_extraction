@@ -3,96 +3,88 @@ import json
 import re
 import requests
 import pandas as pd
+from datetime import datetime
 
 # Configuração da página
-st.set_page_config(page_title="Analista Logístico SPX", page_icon="📦", layout="wide")
+st.set_page_config(page_title="SPX Hub Porto Velho", page_icon="📦", layout="wide")
 
-st.title("📦 Analista Logístico Inteligente")
-st.markdown("Integração direta com o portal SPX via API.")
+st.title("📦 Analista Logístico Inteligente - PVH")
 
-# Sidebar para configurações de acesso
+# Sidebar
 with st.sidebar:
-    st.header("🔑 Configuração de Acesso")
-    sessao_colada = st.text_area("Sessão ou Cookie Cru:", height=200, help="Cole aqui o Cookie gigante da aba Network.")
-    st.info("A sessão é mantida apenas na memória temporária desta aba.")
+    st.header("🔑 Conexão")
+    sessao_colada = st.text_area("Cole a Sessão da Extensão:", height=100)
+    st.info("Utilize a extensão Elite para capturar os cookies.")
 
-# Área principal
-col1, col2 = st.columns([1, 2])
+# Campos solicitados
+st.subheader("🚀 Extração de Dados Específicos")
+lista_brs = st.text_area("Lista de Shipment IDs:", height=150, placeholder="BR268346709914A...")
+btn = st.button("🚀 Gerar Relatório Detalhado", use_container_width=True)
 
-with col1:
-    st.subheader("🚀 Extração em Lote")
-    lista_brs = st.text_area("Lista de Shipment IDs (um por linha):", 
-                             placeholder="BR262635244052P\nBR123456789...",
-                             height=200)
+# Mapeamento de Status (Ajuste conforme a realidade do seu Hub)
+STATUS_MAP = {
+    1: "Recebido no Hub",
+    2: "Em Processamento",
+    3: "Em Trânsito",
+    4: "Entregue",
+    10: "Retornado",
+}
+
+def formatar_data(timestamp):
+    if not timestamp or timestamp == 0: return "N/A"
+    # Converte timestamp Unix (segundos) para data legível
+    return datetime.fromtimestamp(timestamp).strftime('%d/%m/%Y %H:%M')
+
+def mapear_dados_especificos(raw_data):
+    b = raw_data.get('basic_info', {})
     
-    botao_executar = st.button("Buscar Dados das BRs", use_container_width=True)
+    # Nota: SKU e Datas específicas de eventos costumam vir de outras APIs
+    # Se o dado não estiver neste JSON, deixamos o campo pronto para receber a nova API
+    return {
+        "Shipment ID": b.get('shipment_id'),
+        "Current Station": b.get('current_station_name'),
+        "Status": STATUS_MAP.get(b.get('status'), f"Cód {b.get('status')}"),
+        "Data de Recebimento": "Localizar API 'logistics_path'", # Placeholder
+        "Última AT": formatar_data(b.get('sla_tag_info', {}).get('update_time')),
+        "Descrição do SKU": "Localizar API 'item_info'" # Placeholder
+    }
 
-# Lógica de Extração
-if botao_executar:
-    if not sessao_colada:
-        st.error("❌ Milorde, por favor cole a sessão na barra lateral.")
-    elif not lista_brs:
-        st.warning("⚠️ Insira ao menos um código de remessa (BR).")
+if btn:
+    if not sessao_colada or not lista_brs:
+        st.error("❌ Verifique a sessão e a lista de BRs.")
     else:
         try:
-            # 1. Modo de Leitura Inteligente (Aceita JSON ou Texto Cru)
-            try:
-                dados_sessao = json.loads(sessao_colada)
-                cookies_string = dados_sessao.get('cookies', '')
-            except json.JSONDecodeError:
-                cookies_string = sessao_colada # Assume que é o texto cru copiado da Network
+            cookies = sessao_colada.replace('\n', '').replace('\r', '').strip()
+            csrf = re.search(r'csrftoken=([^;]+)', cookies).group(1) if 'csrftoken' in cookies else 'dummy'
             
-            # --- A FAXINA AUTOMÁTICA ---
-            # Remove quebras de linha invisíveis (\n e \r) que quebram o cabeçalho HTTP
-            cookies_string = cookies_string.replace('\n', '').replace('\r', '').strip()
-            
-            # 2. Extrair CSRF Token
-            csrf_match = re.search(r'csrftoken=([^;]+)', cookies_string)
-            csrf_token = csrf_match.group(1) if csrf_match else 'dummy_token'
-            
-            # 3. Limpar a lista de BRs (aceita textos com espaços, vírgulas, etc)
-            ids_para_buscar = re.findall(r'BR[a-zA-Z0-9]+', lista_brs)
-            
-            if not ids_para_buscar:
-                st.error("❌ Nenhum código BR válido foi detectado no texto.")
-            else:
-                headers = {
-                    'Cookie': cookies_string,
-                    'X-CSRFToken': csrf_token,
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'application/json, text/plain, */*'
-                }
+            headers = {
+                'Cookie': cookies,
+                'X-CSRFToken': csrf,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json, text/plain, */*'
+            }
 
-                resultados = []
-                progresso = st.progress(0)
+            ids = re.findall(r'BR[a-zA-Z0-9]+', lista_brs)
+            final_data = []
+
+            with st.spinner("Conectando à malha logística..."):
+                for bid in ids:
+                    url = f"https://spx.shopee.com.br/api/fleet_order/order/detail/order_info?shipment_id={bid}"
+                    res = requests.get(url, headers=headers)
+                    if res.status_code == 200:
+                        raw = res.json().get('data', {})
+                        if raw:
+                            final_data.append(mapear_dados_especificos(raw))
+            
+            if final_data:
+                df = pd.DataFrame(final_data)
+                st.subheader("📊 Visão Operacional Detalhada")
+                st.dataframe(df, use_container_width=True, hide_index=True)
                 
-                for i, shipment_id in enumerate(ids_para_buscar):
-                    url = f"https://spx.shopee.com.br/api/fleet_order/order/detail/order_info?shipment_id={shipment_id}"
-                    
-                    with st.spinner(f"Buscando {shipment_id}..."):
-                        resp = requests.get(url, headers=headers)
-                        
-                        if resp.status_code == 200:
-                            dados_brutos = resp.json()
-                            # Extrai a raiz dos dados, adaptando-se ao formato da SPX
-                            info = dados_brutos.get('data', dados_brutos)
-                            info['shipment_id_search'] = shipment_id 
-                            resultados.append(info)
-                        else:
-                            st.error(f"Erro no ID {shipment_id}: Status {resp.status_code} - Resposta: {resp.text}")
-                    
-                    progresso.progress((i + 1) / len(ids_para_buscar))
-
-                # 4. Exibição dos Resultados em Tabela
-                if resultados:
-                    st.success(f"🎯 Extração concluída! {len(resultados)} remessas processadas.")
-                    df = pd.DataFrame(resultados)
-                    
-                    st.subheader("📊 Tabela Consolidada")
-                    st.dataframe(df, use_container_width=True)
-                    
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Baixar Planilha (CSV)", csv, "dados_spx.csv", "text/csv")
+                csv = df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥 Baixar Relatório (Excel)", csv, "relatorio_pvh_detalhado.csv", "text/csv")
+            else:
+                st.error("❌ Nenhum dado retornado. Verifique a sessão.")
 
         except Exception as e:
-            st.error(f"❌ Erro crítico: {e}")
+            st.error(f"Erro Crítico: {e}")
