@@ -9,7 +9,6 @@ import time
 # Configuração da página para Porto Velho
 st.set_page_config(page_title="Analista SPX - PVH", page_icon="📦", layout="wide")
 
-# Inicialização do estado da sessão
 if 'cookie_session' not in st.session_state:
     st.session_state['cookie_session'] = ""
 
@@ -18,25 +17,23 @@ st.title("📦 Analista Logístico - Painel PVH")
 # --- SIDEBAR: CONEXÃO ---
 with st.sidebar:
     st.header("🔑 Conexão")
-    input_bruto = st.text_area("Cole a Sessão aqui:", height=200, placeholder="Cole o Cookie (SPC_...) ou o JSON")
+    input_bruto = st.text_area("Cole a Sessão aqui:", height=200, placeholder="Cole o Cookie (SPC_...)")
     
     if st.button("✅ Conectar Sessão", use_container_width=True):
         if input_bruto:
             conteudo = input_bruto.strip()
-            
-            # Lógica de detecção para evitar o erro "Extra data"
-            if conteudo.startswith('{'):
+            # Blindagem contra erro de JSON
+            if not conteudo.startswith('{'):
+                st.session_state['cookie_session'] = conteudo
+                st.success("Cookie salvo com sucesso!")
+            else:
                 try:
                     dados_json = json.loads(conteudo)
                     st.session_state['cookie_session'] = dados_json.get('cookies', conteudo)
-                    st.success("Sessão conectada via JSON!")
-                except Exception:
+                    st.success("Sessão extraída do JSON!")
+                except:
                     st.session_state['cookie_session'] = conteudo
-                    st.warning("JSON malformado. Salvo como texto simples.")
-            else:
-                # Aceita o cookie puro (SPC_CLIENTID...) diretamente
-                st.session_state['cookie_session'] = conteudo
-                st.success("Cookie salvo com sucesso!")
+                    st.success("Salvo como texto puro.")
         else:
             st.error("Cole o conteúdo primeiro!")
 
@@ -45,10 +42,9 @@ with st.sidebar:
         st.rerun()
 
 # --- INTERFACE PRINCIPAL ---
-lista_brs = st.text_area("IDs das BRs:", height=150, placeholder="BR266134291302T\nBR262112125115A")
+lista_brs = st.text_area("IDs das BRs:", height=150, placeholder="BR266...\nBR262...")
 btn_processar = st.button("🔍 Gerar Relatório Operacional", use_container_width=True)
 
-# --- FUNÇÕES DE APOIO ---
 def formatar_data(ts):
     try:
         val = int(ts)
@@ -56,16 +52,23 @@ def formatar_data(ts):
     except: return "N/A"
 
 def processar_br(bid, headers):
-    """Extração via API usando os endpoints de Tracking e SLA"""
     try:
-        # 1. Busca Histórico e Status Atual
+        # Endpoint de Tracking
         url_track = f"https://spx.shopee.com.br/api/fleet_order/order/detail/get_tracking_list?shipment_id={bid}"
-        res_track = requests.get(url_track, headers=headers, timeout=10)
+        res_track = requests.get(url_track, headers=headers, timeout=15)
         
-        if res_track.status_code != 200 or not res_track.text.strip().startswith('{'):
-            return {"Shipment ID": bid, "Status Atual": "Sessão Expirada", "Current Station": "N/A"}
+        # Log de debug interno (não aparece na tela do usuário)
+        if res_track.status_code == 403:
+            return {"Shipment ID": bid, "Status Atual": "Erro 403: Proibido", "Current Station": "Verificar Cookie"}
         
-        data_track = res_track.json().get('data', {})
+        if not res_track.text.strip().startswith('{'):
+            return {"Shipment ID": bid, "Status Atual": "Sessão Expirada/Login Necessário", "Current Station": "N/A"}
+        
+        data_json = res_track.json()
+        if data_json.get('retcode') != 0:
+            return {"Shipment ID": bid, "Status Atual": f"Erro Shopee: {data_json.get('message')}", "Current Station": "N/A"}
+
+        data_track = data_json.get('data', {})
         tracking_list = data_track.get('tracking_list', [])
         
         status_atual, current_station, at_code = "N/A", "N/A", "N/A"
@@ -75,7 +78,6 @@ def processar_br(bid, headers):
             status_atual = ultimo.get('message', "N/A")
             current_station = ultimo.get('station_name', "N/A")
             
-            # Busca a AT (Assignment Task) no histórico
             for evento in reversed(tracking_list):
                 msg = evento.get('message', "")
                 if "Assignment Task [" in msg:
@@ -84,9 +86,9 @@ def processar_br(bid, headers):
                         at_code = at_match.group(1)
                         break
 
-        # 2. Busca Data de Recebimento no Hub PVH (ID 10951)
+        # Busca SLA (Recebimento no Hub PVH - ID 10951)
         url_sla = f"https://spx.shopee.com.br/api/fleet_order/order/detail/sla_info?shipment_id={bid}"
-        res_sla = requests.get(url_sla, headers=headers, timeout=10)
+        res_sla = requests.get(url_sla, headers=headers, timeout=15)
         
         data_rec = "N/A"
         if res_sla.status_code == 200 and res_sla.text.strip().startswith('{'):
@@ -105,51 +107,44 @@ def processar_br(bid, headers):
             "Status Atual": status_atual
         }
     except Exception as e:
-        return {"Shipment ID": bid, "Status Atual": f"Erro: {str(e)}", "Current Station": "N/A"}
+        return {"Shipment ID": bid, "Status Atual": f"Erro de Conexão", "Current Station": "N/A"}
 
-# --- LÓGICA DE EXECUÇÃO ---
 if btn_processar:
     cookie_puro = st.session_state.get('cookie_session', "")
     if not cookie_puro:
         st.error("❌ Conecte a sessão na lateral primeiro!")
-    elif not lista_brs:
-        st.warning("Insira ao menos um ID de BR.")
     else:
-        # Extração automática do CSRF do cookie colado
-        csrf_match = re.search(r'csrftoken=([^;]+)', cookie_puro)
-        csrf_token = csrf_match.group(1) if csrf_match else "dummy"
+        # Extração do CSRF (pegando o ÚLTIMO que aparece no cookie para maior precisão)
+        tokens = re.findall(r'csrftoken=([^;]+)', cookie_puro)
+        csrf_token = tokens[-1] if tokens else "dummy"
         
         headers = {
             'Cookie': cookie_puro,
             'X-CSRFToken': csrf_token,
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://spx.shopee.com.br/',
-            'Origin': 'https://spx.shopee.com.br',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Accept': 'application/json, text/plain, */*'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Referer': 'https://spx.shopee.com.br/orderTracking',
+            'Accept': 'application/json, text/plain, */*',
+            'X-Requested-With': 'XMLHttpRequest'
         }
 
         ids = re.findall(r'BR[a-zA-Z0-9]+', lista_brs)
-        resultados = []
-        
         if not ids:
-            st.error("Nenhum ID válido encontrado.")
+            st.warning("Insira IDs válidos.")
         else:
+            resultados = []
             barra = st.progress(0)
-            status_msg = st.empty()
-
+            status_text = st.empty()
+            
             for i, bid in enumerate(ids):
-                status_msg.text(f"Processando {bid} ({i+1}/{len(ids)})...")
+                status_text.text(f"Consultando {bid}...")
                 resultados.append(processar_br(bid, headers))
                 barra.progress((i + 1) / len(ids))
-                time.sleep(0.4) # Delay para evitar bloqueio por bot
-
-            status_msg.empty()
-
+                time.sleep(0.5) # Delay um pouco maior para segurança
+            
+            status_text.empty()
             if resultados:
                 df = pd.DataFrame(resultados)
                 st.subheader("📊 Relatório Operacional")
                 st.dataframe(df, use_container_width=True, hide_index=True)
-                
                 csv = df.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 Baixar Planilha", csv, f"relatorio_pvh_{datetime.now().strftime('%H%M')}.csv", "text/csv")
+                st.download_button("📥 Baixar Planilha", csv, f"relatorio_{datetime.now().strftime('%H%M')}.csv", "text/csv")
