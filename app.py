@@ -17,15 +17,15 @@ st.title("📦 Analista Logístico - Painel PVH")
 # --- SIDEBAR: CONEXÃO ---
 with st.sidebar:
     st.header("🔑 Conexão")
-    input_bruto = st.text_area("Cole a Sessão aqui:", height=200, placeholder="Cole o Cookie (SPC_...)")
+    input_bruto = st.text_area("Cole a Sessão aqui:", height=200, placeholder="SPC_CLIENTID=...")
     
     if st.button("✅ Conectar Sessão", use_container_width=True):
         if input_bruto:
             conteudo = input_bruto.strip()
-            # Blindagem contra erro de JSON
+            # Blindagem contra erro de JSON - Se não começar com '{', é cookie puro
             if not conteudo.startswith('{'):
                 st.session_state['cookie_session'] = conteudo
-                st.success("Cookie salvo com sucesso!")
+                st.success("Cookie salvo!")
             else:
                 try:
                     dados_json = json.loads(conteudo)
@@ -33,7 +33,7 @@ with st.sidebar:
                     st.success("Sessão extraída do JSON!")
                 except:
                     st.session_state['cookie_session'] = conteudo
-                    st.success("Salvo como texto puro.")
+                    st.success("Salvo como texto.")
         else:
             st.error("Cole o conteúdo primeiro!")
 
@@ -42,7 +42,7 @@ with st.sidebar:
         st.rerun()
 
 # --- INTERFACE PRINCIPAL ---
-lista_brs = st.text_area("IDs das BRs:", height=150, placeholder="BR266...\nBR262...")
+lista_brs = st.text_area("IDs das BRs:", height=150, placeholder="Insira as BRs aqui...")
 btn_processar = st.button("🔍 Gerar Relatório Operacional", use_container_width=True)
 
 def formatar_data(ts):
@@ -53,22 +53,19 @@ def formatar_data(ts):
 
 def processar_br(bid, headers):
     try:
-        # Endpoint de Tracking
+        # 1. Busca Tracking List
         url_track = f"https://spx.shopee.com.br/api/fleet_order/order/detail/get_tracking_list?shipment_id={bid}"
         res_track = requests.get(url_track, headers=headers, timeout=15)
         
-        # Log de debug interno (não aparece na tela do usuário)
-        if res_track.status_code == 403:
-            return {"Shipment ID": bid, "Status Atual": "Erro 403: Proibido", "Current Station": "Verificar Cookie"}
+        # Se não retornar um JSON válido, a sessão caiu
+        if res_track.status_code != 200 or not res_track.text.strip().startswith('{'):
+            return {"Shipment ID": bid, "Status Atual": "Sessão Expirada", "Current Station": "N/A"}
         
-        if not res_track.text.strip().startswith('{'):
-            return {"Shipment ID": bid, "Status Atual": "Sessão Expirada/Login Necessário", "Current Station": "N/A"}
-        
-        data_json = res_track.json()
-        if data_json.get('retcode') != 0:
-            return {"Shipment ID": bid, "Status Atual": f"Erro Shopee: {data_json.get('message')}", "Current Station": "N/A"}
+        res_json = res_track.json()
+        if res_json.get('retcode') != 0:
+            return {"Shipment ID": bid, "Status Atual": f"Shopee: {res_json.get('message')}", "Current Station": "N/A"}
 
-        data_track = data_json.get('data', {})
+        data_track = res_json.get('data', {})
         tracking_list = data_track.get('tracking_list', [])
         
         status_atual, current_station, at_code = "N/A", "N/A", "N/A"
@@ -86,7 +83,7 @@ def processar_br(bid, headers):
                         at_code = at_match.group(1)
                         break
 
-        # Busca SLA (Recebimento no Hub PVH - ID 10951)
+        # 2. Busca SLA (Recebimento no Hub PVH - 10951)
         url_sla = f"https://spx.shopee.com.br/api/fleet_order/order/detail/sla_info?shipment_id={bid}"
         res_sla = requests.get(url_sla, headers=headers, timeout=15)
         
@@ -95,7 +92,7 @@ def processar_br(bid, headers):
             sla_data = res_sla.json().get('data', {})
             regs = sla_data.get('sla_record_list', []) or sla_data.get('dynamic_seg_sla_record_list', [])
             for r in regs:
-                if r.get('sub_type') == "LMHub_Received-LMHub_Assigned" and r.get('src_station_id') == 10951:
+                if r.get('src_station_id') == 10951:
                     data_rec = formatar_data(r.get('service_start_time'))
                     break
         
@@ -107,23 +104,26 @@ def processar_br(bid, headers):
             "Status Atual": status_atual
         }
     except Exception as e:
-        return {"Shipment ID": bid, "Status Atual": f"Erro de Conexão", "Current Station": "N/A"}
+        return {"Shipment ID": bid, "Status Atual": f"Erro Conexão", "Current Station": "N/A"}
 
 if btn_processar:
     cookie_puro = st.session_state.get('cookie_session', "")
     if not cookie_puro:
-        st.error("❌ Conecte a sessão na lateral primeiro!")
+        st.error("❌ Conecte a sessão primeiro!")
     else:
-        # Extração do CSRF (pegando o ÚLTIMO que aparece no cookie para maior precisão)
-        tokens = re.findall(r'csrftoken=([^;]+)', cookie_puro)
-        csrf_token = tokens[-1] if tokens else "dummy"
+        # Ajuste Crítico de CSRF: A Shopee às vezes exige o token sem aspas ou espaços
+        csrf_tokens = re.findall(r'csrftoken=([^;]+)', cookie_puro)
+        csrf_token = csrf_tokens[-1].strip() if csrf_tokens else ""
         
         headers = {
-            'Cookie': cookie_puro,
-            'X-CSRFToken': csrf_token,
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'Referer': 'https://spx.shopee.com.br/orderTracking',
             'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Connection': 'keep-alive',
+            'Cookie': cookie_puro,
+            'Host': 'spx.shopee.com.br',
+            'Referer': 'https://spx.shopee.com.br/orderTracking',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'X-CSRFToken': csrf_token,
             'X-Requested-With': 'XMLHttpRequest'
         }
 
@@ -139,7 +139,7 @@ if btn_processar:
                 status_text.text(f"Consultando {bid}...")
                 resultados.append(processar_br(bid, headers))
                 barra.progress((i + 1) / len(ids))
-                time.sleep(0.5) # Delay um pouco maior para segurança
+                time.sleep(0.6) # Delay para evitar detecção de robô
             
             status_text.empty()
             if resultados:
@@ -147,4 +147,4 @@ if btn_processar:
                 st.subheader("📊 Relatório Operacional")
                 st.dataframe(df, use_container_width=True, hide_index=True)
                 csv = df.to_csv(index=False).encode('utf-8-sig')
-                st.download_button("📥 Baixar Planilha", csv, f"relatorio_{datetime.now().strftime('%H%M')}.csv", "text/csv")
+                st.download_button("📥 Baixar Planilha", csv, "relatorio_pvh.csv", "text/csv")
