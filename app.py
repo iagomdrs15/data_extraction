@@ -5,6 +5,7 @@ import requests
 import pandas as pd
 from datetime import datetime
 import time
+import random
 
 # Configuração da página
 st.set_page_config(page_title="Analista SPX - PVH", page_icon="📦", layout="wide")
@@ -21,8 +22,9 @@ with st.sidebar:
     
     if st.button("✅ Conectar Sessão", use_container_width=True):
         if input_bruto:
-            st.session_state['cookie_session'] = input_bruto.strip()
-            st.success("Sessão salva! Pronto para processar.")
+            # Limpa o cookie de quebras de linha que podem vir da colagem
+            st.session_state['cookie_session'] = input_bruto.strip().replace('\n', '').replace('\r', '')
+            st.success("Sessão salva!")
         else:
             st.error("Cole o conteúdo primeiro!")
 
@@ -42,33 +44,41 @@ def formatar_data(ts):
 
 def processar_br(bid, cookie_bruto):
     try:
-        # Extração inteligente do CSRF (pega o último token do cookie)
+        # Extração do último CSRF token disponível no cookie
         tokens = re.findall(r'csrftoken=([^; ]+)', cookie_bruto)
         csrf = tokens[-1] if tokens else ""
 
+        # Headers REFORÇADOS (Baseados em uma sessão real do SPX)
         headers = {
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Connection': 'keep-alive',
-            'Content-Type': 'application/json',
-            'Cookie': cookie_bruto,
-            'Host': 'spx.shopee.com.br',
-            'Origin': 'https://spx.shopee.com.br',
-            'Referer': f'https://spx.shopee.com.br/orderTracking?shipment_id={bid}',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            'X-CSRFToken': csrf,
-            'X-Requested-With': 'XMLHttpRequest'
+            'authority': 'spx.shopee.com.br',
+            'accept': 'application/json, text/plain, */*',
+            'accept-language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'cookie': cookie_bruto,
+            'referer': f'https://spx.shopee.com.br/orderTracking?shipment_id={bid}',
+            'sec-ch-ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'x-csrftoken': csrf,
+            'x-requested-with': 'XMLHttpRequest'
         }
 
         with requests.Session() as s:
-            # 1. API de Tracking (Histórico)
+            # 1. API de Tracking
             url_track = f"https://spx.shopee.com.br/api/fleet_order/order/detail/get_tracking_list?shipment_id={bid}"
             r_track = s.get(url_track, headers=headers, timeout=15)
             
-            if r_track.status_code != 200 or not r_track.text.startswith('{'):
-                return {"Shipment ID": bid, "Status Atual": "Sessão Inválida", "Current Station": "N/A"}
+            # Debug: Se não começar com {, algo deu errado na autenticação
+            if not r_track.text.strip().startswith('{'):
+                return {"Shipment ID": bid, "Status Atual": "Sessão Inválida (Bloqueio Shopee)", "Current Station": "N/A"}
 
             res_track = r_track.json()
+            if res_track.get('retcode') != 0:
+                return {"Shipment ID": bid, "Status Atual": f"Erro: {res_track.get('message', 'Sessão Expirada')}", "Current Station": "N/A"}
+
             data_track = res_track.get('data', {})
             t_list = data_track.get('tracking_list', [])
             
@@ -85,7 +95,7 @@ def processar_br(bid, cookie_bruto):
                             at_code = match.group(1)
                             break
 
-            # 2. API de SLA (Data no Hub PVH - ID 10951)
+            # 2. API de SLA (Hub PVH - ID 10951)
             url_sla = f"https://spx.shopee.com.br/api/fleet_order/order/detail/sla_info?shipment_id={bid}"
             r_sla = s.get(url_sla, headers=headers, timeout=15)
             
@@ -94,7 +104,6 @@ def processar_br(bid, cookie_bruto):
                 sla_info = r_sla.json().get('data', {})
                 regs = sla_info.get('sla_record_list', []) or sla_info.get('dynamic_seg_sla_record_list', [])
                 for r in regs:
-                    # Filtra pelo seu Hub em Porto Velho
                     if r.get('src_station_id') == 10951:
                         data_rec = formatar_data(r.get('service_start_time'))
                         break
@@ -108,7 +117,7 @@ def processar_br(bid, cookie_bruto):
             }
             
     except Exception as e:
-        return {"Shipment ID": bid, "Status Atual": f"Erro: {str(e)[:20]}", "Current Station": "N/A"}
+        return {"Shipment ID": bid, "Status Atual": f"Erro Conexão", "Current Station": "N/A"}
 
 # --- EXECUÇÃO ---
 if btn_processar:
@@ -125,10 +134,11 @@ if btn_processar:
         status_txt = st.empty()
         
         for i, bid in enumerate(ids):
-            status_txt.text(f"Consultando {bid}...")
+            status_txt.text(f"Consultando {bid} ({i+1}/{len(ids)})...")
             resultados.append(processar_br(bid, cookie))
             barra.progress((i + 1) / len(ids))
-            time.sleep(0.5)
+            # Delay humano variável
+            time.sleep(random.uniform(0.5, 1.0))
         
         status_txt.empty()
         if resultados:
